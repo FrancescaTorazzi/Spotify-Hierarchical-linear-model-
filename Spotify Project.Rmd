@@ -1,0 +1,726 @@
+---
+title: "Pro"
+author: "Sveva Maria Martilotti"
+date: "2024-05-29"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(readxl)
+library(dplyr)
+library(xlsx)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(mvtnorm)
+library(R2jags)
+library(rjags)
+library(MASS)
+library(stats)
+library(MCMCpack)
+library(ggplot2)
+library(coda)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+data<-read_excel("/Users/svevamartilotti/Desktop/Output\ finale.xlsx") 
+data<-na.omit(data) #omitting columns with NA values
+colnames(data)[1] <- "ID"
+data$sex<-NULL 
+```
+
+```{r include=FALSE}
+dati_aggregati <- data %>%
+  group_by(ID, track_name,artist_name) %>%
+  summarise(
+    total_msPlayed = sum(msPlayed, na.rm = TRUE),
+    total_track_duration_ms = sum(track_duration_ms, na.rm = TRUE),
+    track_popularity = first(track_popularity),
+    acousticness = first(acousticness),
+    danceability = first(danceability),
+    energy = first(energy),
+    instrumentalness=first(instrumentalness),
+    key=first(key),
+    liveness=first(liveness),
+    loudness=first(loudness),
+    mode=first(mode),
+    speechiness=first(speechiness),
+    tempo=first(tempo),
+    time_signature=first(time_signature),
+    valence=first(valence),
+    .groups = "drop"
+  )
+```
+```{r include=FALSE}
+dati_aggregati <- dati_aggregati[,-c(2,3)] 
+```
+
+```{r include=FALSE}
+#traformiamo i millisecondi in minuti e togliamo le colonne in millisecondi 
+dati_aggregati$total_minPlayed <- dati_aggregati$total_msPlayed / 60000
+dati_aggregati$total_duration_min <- dati_aggregati$total_track_duration_ms / 60000
+dati_aggregati$total_msPlayed<- NULL
+dati_aggregati$total_track_duration_ms <- NULL
+```
+
+```{r include=FALSE}
+#traformiamo i millisecondi in minuti e togliamo le colonne in millisecondi 
+data<-dati_aggregati[,-c(7,8,9,10,11,12,13)]
+```
+
+
+# DATASET 
+This dataset contains 3362 obs regarding the songs listened to by 8 people, using the Spotify application. 
+
+For each person we have the different sample sizes:
+```{r echo=FALSE}
+obs_per_id <- data %>%
+  group_by(ID) %>%
+  summarise(sample_size = n())
+
+# Visualizzare il risultato
+obs_per_id_transposed <- spread(obs_per_id, key = ID, value = sample_size)
+
+# Visualizzare il risultato
+print(obs_per_id_transposed)
+```
+
+Here is the link to the [Spotify Feature Python script](https://github.com/FrancescaTorazzi/Spotify-data/blob/main/Spotify_feature_general.py), that we wroted in order to get the features values.  
+
+Specifically, it contains the following information: 
+
+ - **ID**
+ 
+ - **track popularity**:
+ 
+ - **acousticness**:
+ 
+ - **danceability**:
+ 
+ - **energy**:
+ 
+ - **instrumentalness**:
+ 
+ - **valence**:
+ 
+ - **total min played**: 
+ 
+ - **total duration min**:
+
+
+# GOAL 
+To understand the impact of various song characteristics on the listening duration (minutes played) across different individuals and to determine which song features most significantly influence listening behavior.
+
+Hence, we want to model the relationship between song characteristics (predictors) and the listening duration (response variable) while accounting for the variability across different individuals (groups).
+
+
+# Hierarchical normal linear regression model
+## Assumptions
+We treat the data within the group as being conditionally i.i.d. given a parameter, which we call **within-group sampling variability**:
+
+$$
+\{Y_{1, j}, \dots, Y_{n_{j}, j} \mid \phi_j\} \sim \text{i.i.d.}\; p(y \mid \phi_j)
+$$
+
+Where $$j=1,....,m$$ are the groups and $$i=1,...,n_{j}$$ are the obs in each groups. 
+
+Further, we have many groups with parameters $\phi_j$ that we assume are
+sampled from a population of *groups* we can treat the group means $\phi_j$ as conditionally i.i.d. given another parameter, which we call **between-group sampling variability**:
+
+$$
+\{\phi_{1}, \dots, \phi_{m} \mid \psi\} \sim \text{i.i.d.} \; p(\phi \mid \psi)
+$$
+
+The key of the hierarchical normal model is to treat the data within a group as
+being normally distributed with some mean $\theta_j$ and variance $\sigma^2$, and the means among groups to *also* be normally distributed according to some other mean $\mu$ and variance $\tau^2$.
+
+Then we simply need a prior distribution on the parameter for the group parameters (a “hyperparameter”) $$\psi$$:
+
+$$
+\psi\ \sim p(\psi)
+$$
+
+Note: in this project, we're assuming that the data within groups share a common variance $\sigma^2$ that doesn't depend on the group $j$.
+
+
+## Model Specification 
+
+We consider \(m\) independent groups, each one of them with \(n\) independent normally distributed data points, \(y_{i,j}\), each of which with subject-specific mean \(\mu_{i,j} = \mathbf{x}_{i,j}^{\top}\boldsymbol{\beta}_j\), with \(\boldsymbol{\beta}_j = (\beta_{1,j}, \ldots, \beta_{p,j})\), and common variance \(\sigma_j^2\); i.e.,
+
+$$
+y_{1,j}.....y_{nj,j}\mid \boldsymbol{\beta}_j, \sigma^2 \overset{\text{ind}}{\sim} N(\mathbf{x}_{i,j}^{\top}\boldsymbol{\beta}_j, \sigma^2), \quad i = 1, \ldots, n_j, \quad j = 1, \ldots, m.
+$$
+
+In addition, we propose a hierarchical prior distribution with the following stages:
+
+$$
+\boldsymbol{\beta}_j \mid \boldsymbol{\theta}, \Sigma \overset{\text{iid}}{\sim} N_p(\boldsymbol{\theta}, \Sigma) \quad \text{and} \quad \sigma^2 \overset{\text{iid}}{\sim} \text{IG}(\nu_0/2, \nu_0\xi_0^2/2),
+$$
+with
+
+$$
+\boldsymbol{\theta} \sim N_p(\boldsymbol{\mu}_0, \Lambda_0)        \quad \Sigma \sim \text{IW}(\eta_0, \mathbf{S}_0^{-1})
+$$
+where \(\text{IW}\) denotes the Inverse Wishart distribution and \(\text{G}\) denotes the Gamma distribution.
+
+```{r echo=FALSE,out.width="40%"}
+knitr::include_graphics("/Users/svevamartilotti/Desktop/Image\ 03-07-24\ at\ 16.28.jpg")
+```
+
+
+## 1: Prior hyperparameters 
+
+The prior hyperparameters have been computed as follows:
+
+$$\mu_0$$= average of $$\hat{\beta}_{OLS}$$ for each j. It's a vector of j=8 element. 
+
+$$\Lambda_0$$= symmetric matrix 8 x 8 of the sample covariance of $$\hat{\beta}_{OLS}$$ for each j.
+
+$$\nu_0$$= 1
+
+$$\xi^2_0$$= average of the within - group sample variance $$\hat{\sigma2}_{OLS}$$
+$$\eta_0$$= p+2
+
+$$S_0$$= $$\Lambda_0$$: hence the inverse is still an 8x8 matrix. 
+
+
+# 2: Posterior Inference 
+
+Joint posterior inference for the model parameters can be achieved by a Gibbs sampling algorithm, which requires iteratively sampling each parameter from its full conditional distribution. 
+
+$$
+\begin{aligned}
+&\text{Let } \Theta = (\sigma^{2}, \beta_j, \theta, \Sigma) \text{ the full set of paramters in the model. The posterior distribution of } \Theta \text{ is} \\
+&p(\Theta | y_{i,j}) \propto p(y_{i,j} |\beta_j, \sigma^{2})p(\beta_j | \theta,\Sigma)p(\theta)p(\Sigma)p(\sigma^2) \\
+&\text{which leads to} \\
+&p(\Theta |y_{i,j}) \propto \\
+&\prod_{j=1}^{m} \prod_{i=1}^{n_j} \sigma^{-1/2} \exp\left(-\frac{1}{2\sigma^2}(y_{i,j} - x_{i,j}^\top\beta_j)^2\right) \\
+&\times \prod_{j=1}^{m} |\Sigma|^{-1/2}\exp\left(-\frac{1}{2}(\beta_j - \theta)^\top\Sigma^{-1}(\beta_j - \theta)\right) \\
+&\times \exp\left(-\frac{1}{2}(\theta-\mu_0)^{\top}\Lambda_0^{-1}(\theta-\mu_0)\right) \\
+&\times |\Sigma|^{-(\eta_0+p+1)/2}\exp(-\frac{1}{2}tr(S_0\Sigma^{-1}))\\
+&\times (\sigma^2)^{-(\nu_o/2+1)}\exp\left(-\frac{\nu_0\xi^2_0}{2\sigma^2}\right)
+\end{aligned}
+$$
+
+Thus, we have that:
+
+$$
+\begin{aligned}
+&\text{The full conditional distribution of } \beta_j, \text{ with } j = 1, \ldots, m, \text{is} \\
+&\beta_j | \text{rest} \sim N_p\left((\Sigma^{-1} + \sigma^{-2} X^\top_j X_j)^{-1}(\Sigma^{-1} \theta + \sigma^{-2} X^\top_j y_j), (\Sigma^{-1} + \sigma^{-2} X^\top_j X_j)^{-1}\right)\\
+
+&\text{The fcd of } \theta \text{ is} \\
+&\theta | \text{rest} \sim N_p\left((\Lambda_0^{-1} + m\Sigma^{-1})^{-1}(\Lambda_0^{-1} \mu_0 + \Sigma^{-1} \sum_j \beta_j), (\Lambda_0^{-1} + m\Sigma^{-1})^{-1}\right) \\
+
+&\text{The fcd of } \Sigma \text{ is} \\
+&\Sigma | \text{rest} \sim IW\left(\eta_0 + m, \left(S_0 + \sum_j (\beta_j - \theta)(\beta_j - \theta)^\top\right)^{-1}\right)\\
+
+&\text{The fcd of } \sigma^2 \text{ is} \\
+&\sigma^2 | \text{rest} \sim IG\left(\frac{\nu_0 + \sum n_j}{2}, \frac{\nu_0 \xi^2_0 + \sum_j \sum_i (y_{ij} - x_{ij}^\top \beta_j)^2}{2}\right)
+\end{aligned}
+$$
+
+
+$$
+\begin{aligned}
+&\text{Let } \phi^{(s)} \text{ denote the state of parameter } \phi \text{ in the s-th iteration of the Gibbs sampling algorithm, for } s = 1, \ldots, S. \\
+&\text{Then, the algorithm works as follows:} \\
+&1. \text{Choose an initial value for each parameter in the model, say } \beta_1^{(0)}, \ldots, \beta_m^{(0)}, \theta^{(0)}, \Sigma^{(0)}, (\sigma^2)^{(0)} \\
+&2. \text{For } s = 1, \ldots, S \text{ update each parameter:} \\
+&(a) \text{ Sample } \beta_j^{(s)} \text{ from its fcd } p(\beta_j | \theta^{(s-1)}, \Sigma^{(s-1)}, (\sigma^2)^{(s-1)}, y_j) \\
+&(b) \text{ Sample } \theta^{(s)} \text{ from its fcd } p(\theta | \beta_j^{(s)}, \Sigma^{(s-1)}) \\
+&(c) \text{ Sample } \Sigma^{(s)} \text{ from its fcd } p(\Sigma | \beta_j^{(s)}, \theta^{(s)}) \\
+&(d) \text{ Sample } (\sigma^2)^{(s)} \text{ from its fcd } p(\sigma^2 | \beta_j^{(s)}, y_{ij})
+\end{aligned}
+$$
+
+
+
+# Explorative analysis 
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+hist(dati_aggregati$total_minPlayed,main=" minPlayed",xlab="minPlayed in min",ylab="Frequency",breaks=150,col="orange",border="black")
+hist(dati_aggregati$total_duration_min,main=" track duration",xlab=" duration in min",ylab="Frequency",breaks=450,col="orange",border="black",xlim=c(0,10))
+hist(dati_aggregati$acousticness,main=" acousticness",xlab="acousticness",ylab="Frequency",breaks=50,col="orange",border="black")
+frequenze <- table(dati_aggregati$track_popularity)
+# Crea il barplot
+barplot(frequenze, main="track popularity", xlab="track_popularity", ylab="Frequency", col="orange", border="black")
+hist(dati_aggregati$danceability,main=" danceability",xlab="danceability",ylab="Frequency",breaks=150,col="orange",border="black")
+hist(dati_aggregati$energy,main=" energy",xlab="energy",ylab="Frequency",breaks=150,col="orange",border="black")
+hist(dati_aggregati$instrumentalness,main=" instrumentalness",xlab="instrumentalness",ylab="Frequency",breaks=400,col="orange",border="black", xlim=c(0,0.02))
+hist(dati_aggregati$valence,main=" valence",xlab="valence",ylab="Frequency",breaks=150,col="orange",border="black")
+```
+1. minPlayed: The frequency decreases rapidly as minPlayed increases, forming a skewed distribution to the right. Note that the range is quite large (0-150 min).
+We can see that about 1000 songs were listened to for about 1 min.
+
+
+2. total track duration: We see that the histogram reaches a peak at 3min, and since the variable is the sum of the total duration of the i-th song (e.g., a song that lasts 3 min, but has been listened to 2 times then it will have a tot duration of 6 min), this means that those songs have been listened to about 1 time. 
+
+*Note*: the total duration in minutes of a song ranges from about 0 to 150min, but in this graph we are only considering one interval (0-10min). 
+
+
+3. acousticness: The presence of a large number of high bars near 0.0 suggests that most of the tracks in the dataset have low acoustics, which could indicate a prevalence of more electronic or studio-produced music.
+
+
+4. track popularity: Molte delle canzoni che sono state ascoltate non sono popolari (peak in 0).
+
+5. danceability: Notiamo inolte che sembra avere una distribuzione Gaussiana, questo significa che la maggior parte delle tracce musicali ha un livello di danceability medio, con poche tracce che sono estremamente ballabili o per niente ballabili. 
+
+6. instrumentalness: I suoni “puramente” strumentali hanno valori di instrumentalness vicini a 1. Quasi tutte le canzoni hanno un bassissimo livello di instrumentallness, questo perchè sono canzoni con parole. 
+
+
+```{r echo=FALSE}
+# Caricare i pacchetti
+library(gridExtra)
+library(ggplot2)
+library(grid)
+
+# Calcolare i minuti riprodotti in media per ogni persona
+media_minuti_per_persona <- data %>%
+  group_by(ID) %>%
+  summarise(media_minuti = mean(total_minPlayed))
+
+# Unire i dati della dimensione del campione con la media dei minuti riprodotti
+campione_e_media <- obs_per_id %>%
+  left_join(media_minuti_per_persona, by = "ID")
+
+# Creare il secondo grafico con le etichette ID
+ggplot(campione_e_media, aes(x = sample_size, y = media_minuti, label = ID)) +
+  geom_point(color = "orange", size = 3, alpha = 0.7) +
+  geom_text(vjust = -0.5, hjust = 0.5, size = 3) + # Aggiungere le etichette ID
+  labs(title = "", x = "Sample Size", y = expression(bar(y)[j])) +
+  theme_minimal()
+```
+*Figure 1* shows that the range of values for $$ \bar{y}_j$$ is quite wide, with the lowest average being 2.38 min and the highest being 14.68 min. 
+
+The plot on the right side shows that, as we expected, the group with the smallest sample size (ID #8) has the most extreme average minutes listened (highest). When the sample size increases, the sample averages tend to be closer to the overall mean. This is because with more data, extreme observations are balanced by other observations, reducing the effect of outliers.
+
+It is important to consider sample sizes, as the averages of small samples can be less reliable and more variable. In the hierarchical model, thanks to the shrinkage effect, the variability of estimates for small groups is reduced, as the estimates are “shrunk” towards the overall mean.
+
+
+```{r include=FALSE}
+rwish<-function(n,nu0,S0){
+  sS0=chol(S0)
+  S=array(dim=c(dim(S0),n))
+  for (i in 1:n){
+    Z<- matrix(rnorm(nu0*dim(S0)[1]),nu0,dim(S0)[1])%*%sS0
+    S[,,i]=t(Z)%*%Z
+  }
+  S[,,1:n]
+}
+
+rmvnorm<-function(n,mu,Sigma){
+  p=length(mu)
+  res=matrix(0,nrow=n,ncol=p)
+  if(n>0 & p>0){
+    E=matrix(rnorm(n*p),n,p)
+    res=t(t(E%*%chol(Sigma))+c(mu))
+  }
+  res
+}
+```
+
+## Start to inizialize 
+```{r}
+# Inizializzazione delle liste
+X <- list()
+Y <- list()
+fit <- list()
+S2_LS <- numeric()
+
+# Numero di persone (8 persone)
+m <- 8
+
+for(j in 1:m) {
+  # Estrai i dati per la persona j
+  data_person <- data[data$ID == j, ]
+  
+  # Estrai e centra i predittori delle canzoni
+  song_predictors <- data_person[, c("track_popularity", "acousticness", "danceability", "energy", 
+                                     "instrumentalness", "valence","total_duration_min")]
+  song_predictors_centered <- scale(song_predictors, center = TRUE, scale = FALSE)
+  
+  # Crea la matrice dei predittori con l'intercetta, il genere e i predittori delle canzoni centrati
+  X[[j]] <- cbind(Intercept = 1, song_predictors_centered)
+  # Estrai la variabile di output
+  Y[[j]] <- data_person$total_minPlayed
+  
+  # Adatta il modello lineare per la persona j
+  fit[[j]] <- lm(Y[[j]] ~ -1 + X[[j]]) # "-1" rimuove l'intercetta perché è già nella matrice X
+  S2_LS <- c(S2_LS, summary(fit[[j]])$sigma^2)
+}
+
+```
+
+```{r}
+summary(X[[1]]) #for ID #1
+summary(Y[[1]])
+```
+
+```{r}
+BETA_LS <- do.call(rbind, lapply(fit, function(model) {
+  coef(model) 
+}))
+
+print("BETA_LS:")
+
+dim(BETA_LS)
+```
+*Note*: BETA_LS is a matrix m x p, hence for each group it shows the OLS estimated coefficients. 
+
+```{r include=FALSE}
+p=dim(X[[1]])[2]
+```
+```{r echo=TRUE}
+theta<-mu0<-apply(BETA_LS,2,mean)
+s2<-s20<-mean(S2_LS)
+L0<-as.matrix(cov(BETA_LS))
+eta0<-p+2
+epsilon <- 1e-5 
+L0 <- L0 + diag(epsilon, nrow(L0))
+Sigma<-S0<-L0
+BETA<-BETA_LS
+THETA.b<-S2.b<-NULL
+iL0<-solve(L0)
+iSigma<-solve(Sigma)
+Sigma.ps<-matrix(0,p,p)
+SIGMA.PS<-NULL
+BETA.ps<-BETA*0
+BETA.pp<-NULL
+nu0=1
+```
+
+```{r echo=FALSE}
+print("nu0:")
+print(nu0)
+print("eta0:")
+print(eta0)
+print("mu0:")
+print(mu0)
+print("s20:")
+print(s20)
+print("L0:")
+print(L0)
+```
+
+Finally, we have computed all the values we needed to initialized the chain and now we run a Gibbs sampler for 25.000 draws and saves every 10th draws, obtaining a sequence of 2.500 values for each parameter.
+
+```{r include=FALSE}
+set.seed(1)
+for (s in 1:25000){
+  #update beta_j
+  for(j in 1:m){
+    Vj<-solve(iSigma+t(X[[j]])%*%X[[j]]/s2)
+    Ej<-Vj%*%(iSigma%*%theta+t(X[[j]])%*%Y[[j]]/s2)
+    BETA[j,]<-rmvnorm(1,Ej,Vj)
+  }
+  #update theta
+  Lm<-solve(iL0+m*iSigma)
+  mum<-Lm%*%(iL0%*%mu0+iSigma%*%apply(BETA,2,sum))
+  theta<-t(rmvnorm(1,mum,Lm))
+  
+  #update Sigma
+  mtheta<-matrix(theta,m,p,byrow=TRUE)
+  iSigma<-rwish(1,eta0+m,solve(S0 + t(BETA - mtheta) %*% (BETA - mtheta)))
+
+  #update s2
+  RSS<-0
+  for(j in 1:m){
+    RSS<-RSS+sum((Y[[j]]-X[[j]]%*%BETA[j,])^2)
+  }
+  s2<-1/rgamma(1,(nu0+3362)/2,(nu0*s20+RSS)/2)
+  
+  # store results
+  if(s%%10==0){
+    cat(s,s2,"\n")
+    S2.b<-c(S2.b,s2)
+    THETA.b<-rbind(THETA.b, t(theta))
+    Sigma.ps<-Sigma.ps+solve(iSigma) 
+    BETA.ps<-BETA.ps+BETA
+    SIGMA.PS<-rbind(SIGMA.PS,c(solve(iSigma)))
+    BETA.pp<-rbind(BETA.pp,rmvnorm(1,theta,solve(iSigma)))
+  }
+}
+
+#thinning=10
+#BETA.pp is the posterior predictive distribution. 
+```
+
+Output:
+-**THETA.b** stores the updated samples of $$\theta$$ during each iteration that is recorded. It has a dimension of *2500 x p*.
+
+- **SIGMA.PS** stores the updated samples of $$\Sigma$$ during each iteration that is recorded. It has a dimension of *2500 x (p x p)*, where p x p is the number of elements in a covariance matrix.
+
+- **S2.b** stores the updated samples of $$\xi^2_0$$ during each iteration that is recorded. It is a list of *2500* values.
+
+- **BETA.ps** stores the cumulative sum of BETA for each iteration that is recorded. It has a dimension of *m x p*. 
+
+- **BETA.pp** stores the posterior predictive samples of BETA. It has a dimension of *2500 x p*.
+
+
+We can use the simulated values to make Monte Carlo approximation to various posterior features of interest. 
+
+
+# Convergence diagnostic MCMC
+When running an MCMC simulation, successive samples are often correlated with each other. This correlation reduces the effective information obtained compared to independent sampling. 
+
+
+## Effective Sample Size
+ESS measures how much information content is loss due to the correlation in the sequence. 
+So, although our sequence have a length of 2500, our effective sample size will be smaller due to the correlation and redundancy between the samples.
+
+So higher is the ESS, lower is the correlation in the sequence. 
+
+```{r}
+effectiveSize(S2.b) #sigma^2
+effectiveSize(THETA.b[,1]) #theta_intercept 
+effectiveSize(THETA.b[,2]) #theta_2predictor
+apply(SIGMA.PS,2,effectiveSize) #Sigma
+```
+As we can see, all the values are pretty much close to 2500. 
+
+```{r include=FALSE}
+# Converti i campioni in oggetti mcmc
+theta_mcmc <- mcmc(THETA.b)
+s2_mcmc <- mcmc(S2.b)
+```
+
+#Traceplot 
+
+We can also graphically check the convergence of the chain.
+
+```{r echo=FALSE, out.width="60%"}
+par(mfrow=c(2,2))
+traceplot(theta_mcmc,main="traceplot of theta_p")
+```
+```{r echo=FALSE,out.width="40%"}
+traceplot(s2_mcmc,main="traceplot of sigma^2")
+```
+In general, we see that the values fluctuate without showing a clear upward or downward trend, which is a good sign of convergence. The chain appears to explore the parameter space well, covering a consistent range of values without getting stuck in any particular region.
+
+
+## Autocorrelation plot
+It measure the correlation in the sequence of values, at different lags.
+
+```{r echo=FALSE, out.width="40%"}
+acf(s2_mcmc,main="Autocorrelation for sigma^2")
+```
+```{r echo=FALSE, out.width="70%"}
+par(mfrow=c(2,2))
+acf(THETA.b[,1])
+acf(THETA.b[,2])
+acf(THETA.b[,3])
+acf(THETA.b[,4])
+acf(THETA.b[,5])
+acf(THETA.b[,6])
+acf(THETA.b[,7])
+acf(THETA.b[,8])
+```
+We note that the bars quickly drop to 0, indicating that the samples are almost independent.
+
+#Geweke test
+The idea is that if the chain has reached convergence, then if I take a statistic calculated at two opposite points of the chain, these will not be significantly different.
+
+Fraction in 1st window represents the first 10% of chain samples.
+
+Fraction in 2nd window represents the middle 50% of chain samples.
+
+The Geweke test compares the mean of the initial window with that of the middle window to determine if the MCMC chain is converging.
+
+```{r include=FALSE}
+geweke_theta <- geweke.diag(theta_mcmc)
+geweke_s2 <- geweke.diag(s2_mcmc)
+```
+```{r}
+# Print Geweke test results
+print(geweke_theta)
+print(geweke_s2)
+```
+As we can see, all z-standardized values are close to 0, indicating that the means of the compared windows are similar, suggesting that the chain is converging.
+
+
+# Interpretation of Regression Coefficients:
+Below, we can see the posterior mean, the standard deviation (uncertainty of the estimate), and the credibility intervals (CI), which represent the range within the true value of the parameter lies with a certain probability (95%), for each coefficient. 
+
+```{r echo=FALSE}
+summary_stats <- summary(theta_mcmc)
+coeff_table <- summary_stats$statistics
+mean_sd_table <- coeff_table[, c("Mean", "SD")]
+ci_lower <- apply(theta_mcmc, 2, quantile, probs = 0.025)
+ci_upper <- apply(theta_mcmc, 2, quantile, probs = 0.975)
+mean_sd_table <- cbind(mean_sd_table, `2.5%` = ci_lower, `97.5%` = ci_upper)
+new_row_names <- c("Intercept", "Track_Popularity", "Acousticness", "Danceability", "Energy", "Instrumentalness", "Valence", "Total_Duration")
+rownames(mean_sd_table) <- new_row_names
+print(mean_sd_table)
+```
+**Posterior Mean:**
+1. Intercept: The average value of total_minPlayed is 6.133 min when all predictors are zero. 
+
+2. The other values can be interpreted as the (negative or positive) effect on the response variable, increasing the coefficients by 1. Eg. For each increase of 1 unit in a song's Acousticness index, it is expected that listening minutes will increase by approximately 1 min.
+
+
+In general, we can see that many of the coefficients have credibility intervals that include zero. This indicates that we cannot say with certainty that these coefficients have a significant effect on the response variable (total_minPlayed). Among these, **Acousticness** and **Total_Duration** exhibit a significant positive effect on the outcome of interest, as their credibility intervals do not include zero.
+
+
+```{r echo=FALSE}
+set.seed(123)
+par(mfrow = c(1, 3), mar = c(3, 3, 1, 1), mgp = c(1.75, 0.75, 0))
+prior_samples <- rmvnorm(2500, mu = mu0, Sigma = L0)
+
+# Densità a posteriori del secondo parametro
+plot(density(THETA.b[,2],adj=2), xlim = range(prior_samples[, 2]),
+     main = "", xlab = "theta_2", ylab = "Density", lwd = 2)
+lines(density(prior_samples[, 2],adj=2), col = "gray", lwd = 2)
+lines(density(BETA.pp[,2],adj=2),col="purple",lwd=2)
+abline(v = 0.004529486, col = "lightblue", lty = 2)
+
+# Aggiunta della legenda
+legend("topright", legend = c("Posterior", "Prior","post.pred."), lty = c(1, 1), lwd = c(2, 2), col = c("black", "gray","purple"))
+
+
+# Densità a posteriori del terzo parametro
+plot(density(THETA.b[,3],adj=2), xlim = range(prior_samples[, 3]),
+     main = "", xlab = "theta_3", ylab = "Density", lwd = 2)
+lines(density(prior_samples[, 3],adj=2), col = "gray", lwd = 2)
+lines(density(BETA.pp[,3],adj=2),col="purple",lwd=2)
+abline(v = 1.020440215, col = "lightblue", lty = 2)
+
+# Aggiunta della legenda
+legend("topright", legend = c("Posterior", "Prior","post.pred."), lty = c(1, 1), lwd = c(2, 2), col = c("black", "gray","purple"))
+
+# Densità a posteriori del quarto parametro
+plot(density(THETA.b[,4],adj=2), xlim = range(prior_samples[, 4]),
+     main = "", xlab = "theta_4", ylab = "Density", lwd = 2)
+lines(density(prior_samples[, 4],adj=2), col = "gray", lwd = 2)
+lines(density(BETA.pp[,4],adj=2),col="purple",lwd=2)
+abline(v = 0.085012452, col = "lightblue", lty = 2)
+
+# Aggiunta della legenda
+legend("topright", legend = c("Posterior", "Prior","post.pred."), lty = c(1, 1), lwd = c(2, 2), col = c("black", "gray","purple"))
+```
+Note: the lightblue line is the posterior mean.
+The **prior distribution** represents the initial knowledge of the parameter before observing the data: it is more spread due to the uncertainty about the parameter is greater.
+
+The **posterior distribution** reflects our updated knowledge of the parameter based on the observed data: it is narrower and taller compared to the prior distribution, indicating that the information from the data has reduced the uncertainty, and it is centered around the estimated value of the parameter.
+
+The **posterior predictive distribution** is used to make predictions about new data based on the posterior distribution:it's wider than the posterior distribution, reflecting 
+- the additional uncertainty in making predictions about new data
+- heterogeneity across groups (predictions may vary due to differences between groups)
+
+
+## What about the variance?
+
+```{r echo=FALSE}
+post.mean_S2.b<-mean(S2.b)
+print("posterior mean of sigma^2:");post.mean_S2.b
+CI<-quantile(S2.b,c(0.025, 0.975))
+print("CI for sigma^2:");CI
+```
+```{r echo=FALSE,out.width="30%"}
+set.seed(123)
+prior_samples2<- 1/rgamma(2500,nu0/2,(nu0*s20)/2)
+plot(density(S2.b, adj = 2),
+     main = "", xlab = "Sigma^2", ylab = "Density", lwd = 2)
+abline(v = post.mean_S2.b, col = "red", lty = 2)
+abline(v = CI[1], col = "blue", lty = 2)
+abline(v = CI[2], col = "blue", lty = 2)
+lines(density(prior_samples2), col = "yellow", lwd = 2)
+legend("topright", legend = c("post.mean", "CI","prior"), lty = c(1, 1), lwd = c(1, 1), col = c("red", "blue","yellow"))
+
+prior_samples3<- 1/rgamma(2500,nu0/2,(nu0*s20)/2)
+```
+
+From the graph, we can see that the posterior density is more concentrated compared to the prior, which is very flat, suggesting that it was a non-informative prior (as we already know).
+
+Moreover, with a confidence level of 95% we can say that the true value of $$\sigma^2$$ is between  9.5 and 10.5.
+
+
+# SHRINKAGE EFFECT
+
+The parameter estimates for each group are "shrunk" towards a common mean. This means that the estimates for each group are not completely independent but are affected by the overall estimate (share information across groups). 
+
+$$
+E[\beta_j | y_j, \theta, \Sigma, \sigma^2] = (\Sigma^{-1} +\sigma^{-2} X^\top_jX_j)^{-1}(\Sigma^{-1}\theta + \sigma^{-2} X^\top_jy_j)
+$$
+In conclusion, the regression coefficients for each individual (within groups) are shrunk towards the mean of the coefficients for all individuals (across groups) $$\theta$$. This reduces the variance of the estimates and prevents extreme estimates based on limited data. As a consequence, the estimates are more accurate and robust.
+
+
+```{r echo=FALSE,out.width="30%"}
+# Calcolare le medie posteriori dei beta_j per ogni gruppo
+posterior_means <- rowMeans(BETA.ps)
+
+# Calcolare la differenza tra i minPlayed e le medie posteriori dei beta_j
+diff_minPlayed <- media_minuti_per_persona$media_minuti - posterior_means[1:m]  # prendere solo i primi m valori se posterior_means è più lungo
+
+# Ottenere le dimensioni del campione
+sample_size <- obs_per_id$sample_size
+
+# Creare un data frame per la trama
+plot_data <- data.frame(ID = obs_per_id$ID, sample_size = sample_size, diff_minPlayed = diff_minPlayed)
+
+# Creare il primo grafico con ggplot2
+library(ggplot2)
+library(gridExtra)
+
+ggplot(plot_data, aes(x = sample_size, y = diff_minPlayed, label = ID)) +
+  geom_point(color = "blue", size = 3, alpha = 0.7) +
+  geom_text(vjust = -0.5, hjust = 0.5, size = 3) + # Aggiungere le etichette ID
+  labs(title = "borrowing strength",
+       x = "Sample Size",
+       y = "yj_bar - E[bj |.]") +
+  theme_minimal() +
+  geom_hline(yintercept = 0, color = "red", linetype = "solid")
+
+```
+We can see that, as we already expected, $$E[b_j \mid .]$$ is somewhat pushed from $$\bar{y}_j$$ to $$\theta$$, and the effect of shrinkage depends on the sample size of each group $$n_j$$. In particular, we note that groups with low sample sizes get shrunk the most (#8). Why? Because the larger the sample size, the greater the amount of information we have, and therefore, the less strength we need to borrow from the population.
+
+
+```{r}
+post.prob1 = mean(BETA.ps[1,4] > mean(BETA.ps[4,4])); post.prob1 
+```
+
+
+
+### The probability that a randomly selected song by person 1 is listened to more than a randomly selected song by person 2: 
+
+```{r echo=FALSE}
+set.seed(123)  # Imposta un seed per la riproducibilità
+
+# Numero di campioni da generare
+n_samples <- 2500
+
+# Calcola la media di BETA.ps
+BETA_mean <- apply(BETA.ps,2,mean)/2500  # Dividiamo per il numero di iterazioni / thinning (10)
+
+# Genera campioni dalla distribuzione predittiva
+pred_samples_person1 <- matrix(0, nrow=n_samples, ncol=length(Y[[1]]))
+pred_samples_person2 <- matrix(0, nrow=n_samples, ncol=length(Y[[2]]))
+
+# Estrai campioni di sigma^2
+sigma2_samples <- sample(S2.b, n_samples, replace=TRUE)
+
+for (i in 1:n_samples) {
+  beta_sample <- BETA_mean  # Usa la media dei beta posteriori calcolati
+  sigma2_sample <- sigma2_samples[i]
+  pred_samples_person1[i, ] <- X[[1]] %*% (beta_sample) + rnorm(length(Y[[1]]), 0, sqrt(sigma2_sample))
+  pred_samples_person2[i, ] <- X[[2]] %*% (beta_sample) + rnorm(length(Y[[2]]), 0, sqrt(sigma2_sample))
+}
+
+prob <- mean(apply(pred_samples_person1, 1, mean) > apply(pred_samples_person2, 1, mean))
+prob
+```
+
+
+
+
+
+
+
+
+
+
+
